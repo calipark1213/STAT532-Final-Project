@@ -1,0 +1,392 @@
+---
+title: "532 Project"
+author: "Seoyeon Park"
+date: "3/28/2023"
+output: html_document
+---
+
+```{r}
+rm(list = ls())
+```
+
+Import libraries:
+```{r}
+library(survival)
+library(ggplot2)
+library(dplyr)
+library(ggcorrplot)
+library(KMsurv)
+library(survminer)
+library(GGally)
+library(psych)
+library(corrplot)
+library(stats)
+library(grid)
+library(caret)
+library(gtable)
+```
+
+```{r}
+data(heart)
+```
+
+#Data
+
+From https://rdrr.io/cran/survival/man/heart.html
+
+jasa: original data
+
+birth.dt:	birth date
+accept.dt:	acceptance into program
+tx.date:	transplant date
+fu.date:	end of followup
+fustat:	dead or alive
+surgery:	prior bypass surgery
+age:	age (in years)
+futime:	followup time
+wait.time:	time before transplant
+transplant:	transplant indicator (0 = no, 1 = yes)
+mismatch:	mismatch score
+hla.a2:	particular type of mismatch
+mscore:	another mismatch score
+reject:	rejection occurred
+
+
+Use the already processed data, heart for EDA:
+
+start, stop, event:	Entry and exit time and status for this interval of time
+age:	age - 48 years
+year:	year of acceptance (in years after 1 Nov 1967)
+surgery:	prior bypass surgery 1=yes
+transplant:	received transplant 1=yes
+id:	patient id
+
+Patients that identified to be eligible for a heart transplant were followed until death or censorship 
+Original goal of the study was to assess whether patients receiving transplants survived longer than patients who did not receive a transplant
+
+## heart
+
+```{r}
+heart
+```
+
+```{r}
+summary(heart)
+```
+
+
+```{r}
+as.factor(heart$surgery)
+```
+
+
+```{r}
+summary(heart)
+```
+
+```{r}
+min(heart$age + 48) #as young as 8 years old
+max(heart$age + 48) #max age is 64
+```
+
+```{r}
+unique(heart$id)
+```
+
+```{r}
+table(jasa$transplant)
+```
+
+```{r}
+table(jasa$surgery)
+```
+
+
+
+## jasa
+
+```{r}
+summary(jasa)
+```
+
+
+```{r}
+summary(as.factor(jasa$transplant))
+```
+
+```{r}
+summary(as.factor(jasa$surgery))
+```
+
+```{r}
+summary(is.na(jasa))
+summary(jasa)
+```
+
+
+## EDA
+
+```{r}
+ggplot(heart, aes(x=age + 48))+ geom_histogram(binwidth=5, colour="white", fill="#FF6666", alpha=0.8) + scale_x_continuous(breaks=seq(40,100,10)) +labs(title="Age Distribution") + theme_minimal() + xlab("Age") + ylab("Counts") + ggtitle("Age Distribution") 
+ggsave("age distribution.jpg")
+```
+
+
+Look at 6 different age groups:
+[5,15) [15,25) [25,35) [35,45) [45,55) [55,65)
+
+```{r}
+cut(heart$age + 48, breaks = c(5, 15, 25, 35, 45, 55, 65), right = F)
+```
+
+```{r}
+summary(cut(heart$age + 48, breaks = c(5, 15, 25, 35, 45, 55, 65), right = F))
+```
+
+```{r}
+pie_data <- data.frame(group = c("[5,15)", "[15,25)", "[25,35)", "[35,45)", "[45,55)", "[55,65)"), value = c(1/172, 6/172, 15/172, 42/172, 94/172, 14/172))
+pie_data$group <- factor(pie_data$group, levels = pie_data$group, ordered = T)
+ggplot(pie_data, aes(x="", y=value, fill=group)) + geom_bar(stat="identity", width=1) + coord_polar("y", start=0)  + theme_minimal() + xlab("") + ylab("") + ggtitle("Proportion of Age Groups") 
+ggsave("age pie.jpg")
+```
+
+
+```{r}
+heart$surgery <- as.factor(heart$surgery)
+heart$transplant <- as.factor(heart$transplant)
+```
+
+```{r}
+ggplot(jasa, show.legend = FALSE) + geom_bar(mapping = aes(y = surgery, fill = as.factor(surgery))) + theme_minimal() + xlab("Counts") + ylab("Prior Bypass Surgery") + ggtitle("Proportion of Surgery") + labs(fill = "Prior Bypass Surgery, Yes = 1")
+ggsave("surgery proportion.jpg")
+```
+
+```{r}
+ggplot(jasa, show.legend = FALSE) + geom_bar(mapping = aes(y = transplant, fill = as.factor(transplant))) + theme_minimal() + xlab("Counts") + ylab("Transplant Received") + ggtitle("Proportion of Transplants") + labs(fill = "Transplant Received, Yes = 1")
+ggsave("transplant proportion.jpg")
+```
+
+Maybe include this in analysis for deciding covariates (and looking at time-dependent covariates too)
+
+```{r}
+model.matrix(~0+., data=jasa) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(show.diag=FALSE, type="lower", lab=TRUE, lab_size=8)
+```
+
+"The key rule for time dependent covariates in a Cox model is simple and essentially the same as that for gambling: you cannot look into the future. A covariate may change in any way based on past data or outcomes, but it may not reach forward in time."
+
+Anomalies in the data:
+https://cran.r-project.org/web/packages/survival/vignettes/timedep.pdf pg 10
+
+In original data, a patient has died on the same day as acceptance into the program. 
+
+```{r}
+subset(jasa, accept.dt == fu.date)
+```
+
+in the heart dataset processed from the raw data jasa, it is important to note that some patients have multiple rows 
+
+For example, patient id 3, 4, 7, etc. 
+
+```{r}
+heart
+```
+
+```{r}
+data(heart)
+```
+
+## KME - Very basic approach!
+
+Examine survival as a function of whether subject received a heart transplant, or has a history of prior bypass surgery
+
+Difference in survival for transplant - use jasa
+p.val = T gives a log-rank test (is there a difference in survival between groups)
+
+```{r}
+survTransplant <- survdiff(Surv(futime, fustat) ~ transplant, data = jasa, rho = 0)
+survTransplant
+```
+
+```{r}
+summary(survTransplant)
+```
+
+
+```{r}
+survplotTransplant <- ggsurvplot(survfit(Surv(futime, fustat) ~ transplant, data = jasa), conf.int=TRUE, pval=TRUE, pval.method = T, surv.median.line = "hv",
+           legend.labs=c("Transplant = No", "Transplant = Yes"), legend.title="Transplant",  
+           palette=c("dodgerblue2", "orchid2"), 
+           title="Kaplan-Meier Curve for Heart Transplant Survival", 
+           risk.table.height=.15)
+survplotTransplant
+ggsave("survplotTransplant.jpg")
+```
+
+```{r}
+survSurgery <- survfit(Surv(futime, fustat) ~ surgery, data = jasa, conf.type = "plain")
+survSurgery
+```
+
+```{r}
+survplotSurgery <- ggsurvplot(survSurgery, conf.int=TRUE, pval=TRUE, pval.method = T, surv.median.line = "hv",
+           legend.labs=c("Prior Bypass Surgery = No", "Prior Bypass Surgery = Yes"), legend.title = "Surgery",  
+           palette=c("dodgerblue2", "orchid2"), 
+           title="Kaplan-Meier Curve for Heart Transplant Survival", 
+           risk.table.height=.15)
+survplotSurgery
+ggsave("survplotSurgery.jpg")
+```
+
+Issues with doing a simple KME:
+- Patients who received transplants had to wait from acceptance date on the transplant list until a suitable donor was found 
+- During this wait period they were all at risk for death, but did not have a transplant
+- Thus the wait time accumulated by the transplant patients contributes to survival of the non-transplant patients (Unless total survival time for each patient was used)
+
+- tissue mismatch score and age transplant only are indicators for survival of the patients who did indeed receive a transplant 
+
+## Cox-PH
+
+exp(coef) gives the hazard ratio:
+HR = 1, no effect
+HR > 1, increase in hazard
+HR < 1: Reduction in hazard
+
+
+Because of the second issue of this problem we need to separate individual's survival before and after transplant.
+
+Lucky for us, we already have a cleaned dataset that separated this already for us:
+i.e. use heart NOT jasa
+
+In the heart dataset, patients who received a transplant are treated as two cases, before and after the operation, so cases in the transplant group are in general both right censored and left-truncated. This is handled by Surv by supplying entry and exit times. 
+For example, patient 3, 4, 7 
+
+```{r}
+jasa
+```
+
+```{r}
+heart$surgery <- as.factor(heart$surgery)
+heart$transplant <- as.factor(heart$transplant)
+```
+
+
+```{r}
+heart
+```
+
+NOT the correct coxph model! 
+```{r}
+fit1 <- coxph(Surv(futime, fustat) ~ transplant, data = jasa)
+fit1
+```
+
+Need to correct for time-dependent transplant status - i.e. use heart dataset
+
+Fit all variables:
+```{r}
+heart
+```
+
+
+Full Cox PH:
+
+```{r}
+cox1 <- coxph(Surv(start, stop, event) ∼ age + year + surgery + transplant, data = heart)
+cox1
+```
+
+```{r}
+summary(cox1)
+```
+
+```{r}
+temp <- cox.zph(cox1, transform = "log")
+temp
+```
+
+```{r}
+plot(temp[1])
+abline(h = cox1$coefficients[1], lty = 4, col = "red")
+```
+
+```{r}
+plot.new()
+plot(temp[2])
+abline(h = cox1$coefficients[2], lty = 4, col = "red")
+```
+
+```{r}
+plot.new()
+plot(temp[3])
+abline(h = cox1$coefficients[3], lty = 4, col = "red")
+```
+
+```{r}
+plot.new()
+plot(temp[4])
+abline(h = cox1$coefficients[4], lty = 4, col = "red")
+```
+
+A better model to consider would be to include an interaction of year and transplant. As well, stratify the transplant variable as it is time dependent. 
+
+-> Transplant lists are in order, therefore the year of acceptance into the program definitely has an interaction with transplant. 
+
+```{r}
+cox2 <- coxph(Surv(start, stop, event) ∼ strata(transplant) + age + year + surgery + year:transplant, data = heart)
+cox2
+```
+
+```{r}
+summary(cox2)
+```
+
+
+```{r}
+temp <- cox.zph(cox2, transform = "log")
+temp
+```
+
+
+```{r}
+plot(temp, conf.int = T)
+```
+
+```{r}
+plot.new()
+plot(temp[1])
+abline(h = cox2$coefficients[1], lty = 4, col = "red")
+```
+
+```{r}
+plot.new()
+plot(temp[2])
+abline(h = cox2$coefficients[2], lty = 4, col = "red")
+```
+
+```{r}
+plot.new()
+plot(temp[3])
+abline(h = cox2$coefficients[3], lty = 4, col = "red")
+```
+
+```{r}
+plot.new()
+plot(temp[4])
+abline(h = cox2$coefficients[4], lty = 4, col = "red")
+```
+
+For both models, n = 172 only refers to the number of observations in the dataset. There are duplicates of patient id in the heart data!
+
+
+
+
+
+
+
+
+
+
+
+
